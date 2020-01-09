@@ -373,7 +373,7 @@ void MissionImpl::upload_mission_async(
     assemble_mavlink_messages();
 
     _parent->register_timeout_handler(
-        std::bind(&MissionImpl::process_timeout, this), RETRY_TIMEOUT_S, &_timeout_cookie);
+        std::bind(&MissionImpl::process_timeout_upload, this), RETRY_TIMEOUT_S, &_timeout_cookie);
 
     {
         std::lock_guard<std::mutex> lock(_activity.mutex);
@@ -465,7 +465,7 @@ void MissionImpl::download_mission_async(
     }
 
     _parent->register_timeout_handler(
-        std::bind(&MissionImpl::process_timeout, this), RETRY_TIMEOUT_S, &_timeout_cookie);
+        std::bind(&MissionImpl::process_timeout_download, this), RETRY_TIMEOUT_S, &_timeout_cookie);
 
     {
         std::lock_guard<std::mutex> lock(_activity.mutex);
@@ -1099,7 +1099,7 @@ void MissionImpl::clear_mission_async(const Mission::result_callback_t& callback
     }
 
     _parent->register_timeout_handler(
-        std::bind(&MissionImpl::process_timeout, this), RETRY_TIMEOUT_S, &_timeout_cookie);
+        std::bind(&MissionImpl::process_timeout_upload, this), RETRY_TIMEOUT_S, &_timeout_cookie);
 
     {
         std::lock_guard<std::mutex> lock(_activity.mutex);
@@ -1370,7 +1370,7 @@ void MissionImpl::subscribe_progress(Mission::progress_callback_t callback)
     _mission_data.progress_callback = callback;
 }
 
-void MissionImpl::process_timeout()
+void MissionImpl::process_timeout_upload()
 {
     bool should_retry = false;
     {
@@ -1380,7 +1380,53 @@ void MissionImpl::process_timeout()
             should_retry = true;
         } else if (_activity.state == Activity::State::SET_MISSION_COUNT) {
             should_retry = true;
-        } else if (
+        } else {
+            LogWarn() << "unknown mission timeout";
+        }
+    }
+
+    if (should_retry) {
+        _mission_data.mutex.lock();
+        if (_mission_data.retries++ > MAX_RETRIES) {
+            _mission_data.retries = 0;
+
+            Mission::result_callback_t temp_callback =
+                _mission_data.result_callback;
+            _mission_data.mutex.unlock();
+
+            {
+                std::lock_guard<std::mutex> lock(_activity.mutex);
+                _activity.state = Activity::State::NONE;
+            }
+            LogWarn() << "Mission handling timed out while uploading mission.";
+            report_mission_result(temp_callback, Mission::Result::TIMEOUT);
+        } else {
+            _mission_data.mutex.unlock();
+
+            _parent->register_timeout_handler(
+                std::bind(&MissionImpl::process_timeout_upload, this), RETRY_TIMEOUT_S, &_timeout_cookie);
+
+            {
+                std::lock_guard<std::mutex> lock(_activity.mutex);
+                if (_activity.state == Activity::State::SET_MISSION_COUNT) {
+                    LogWarn() << "Retrying send mission count...";
+                    send_count();
+                } else if (_activity.state == Activity::State::SET_MISSION_ITEM) {
+                    LogWarn() << "Retrying send mission count...";
+                    upload_mission_item();
+                }
+            }
+        }
+    }
+}
+
+void MissionImpl::process_timeout_download()
+{
+    bool should_retry = false;
+    {
+        std::lock_guard<std::mutex> lock(_activity.mutex);
+
+        if (
             _activity.state == Activity::State::GET_MISSION_LIST ||
             _activity.state == Activity::State::GET_MISSION_REQUEST) {
             should_retry = true;
@@ -1393,6 +1439,7 @@ void MissionImpl::process_timeout()
         _mission_data.mutex.lock();
         if (_mission_data.retries++ > MAX_RETRIES) {
             _mission_data.retries = 0;
+
             Mission::mission_items_and_result_callback_t temp_callback =
                 _mission_data.mission_items_and_result_callback;
             _mission_data.mutex.unlock();
@@ -1407,7 +1454,7 @@ void MissionImpl::process_timeout()
             _mission_data.mutex.unlock();
 
             _parent->register_timeout_handler(
-                std::bind(&MissionImpl::process_timeout, this), RETRY_TIMEOUT_S, &_timeout_cookie);
+                std::bind(&MissionImpl::process_timeout_download, this), RETRY_TIMEOUT_S, &_timeout_cookie);
 
             {
                 std::lock_guard<std::mutex> lock(_activity.mutex);
@@ -1417,12 +1464,6 @@ void MissionImpl::process_timeout()
                 } else if (_activity.state == Activity::State::GET_MISSION_REQUEST) {
                     LogWarn() << "Retrying requesting mission item...";
                     download_next_mission_item();
-                } else if (_activity.state == Activity::State::SET_MISSION_COUNT) {
-                    LogWarn() << "Retrying send mission count...";
-                    send_count();
-                } else if (_activity.state == Activity::State::SET_MISSION_ITEM) {
-                    LogWarn() << "Retrying send mission count...";
-                    upload_mission_item();
                 }
             }
         }

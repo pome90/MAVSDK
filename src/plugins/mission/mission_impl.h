@@ -64,7 +64,8 @@ private:
     void process_mission_count(const mavlink_message_t& message);
     void process_mission_item_int(const mavlink_message_t& message);
 
-    void process_timeout();
+    void process_timeout_upload();
+    void process_timeout_download();
 
     void upload_mission_item();
 
